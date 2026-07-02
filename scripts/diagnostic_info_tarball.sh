@@ -8,6 +8,7 @@ set -u
 OUTDIR="gpu-info-$(hostname -s 2>/dev/null || echo host)-$(date -u +%Y%m%dT%H%M%SZ)"
 MAKE_TAR=1
 ALL_PCI=0
+REDACT=1
 BDFS=""
 
 usage() {
@@ -21,6 +22,7 @@ Options:
   --all-pci          Collect per-device sysfs/lspci details for every PCI device,
                      not only NVIDIA/display/3D devices.
   --no-tar           Do not create a .tar.gz archive.
+  --no-redact        Skip hardware serial number redaction (raw output).
   -h, --help         Show this help.
 EOF
 }
@@ -41,6 +43,10 @@ while [ "$#" -gt 0 ]; do
             ;;
         --no-tar)
             MAKE_TAR=0
+            shift
+            ;;
+        --no-redact)
+            REDACT=0
             shift
             ;;
         -h|--help)
@@ -408,6 +414,30 @@ while read -r bdf; do
     printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
         "$bdf" "$vendor" "$device" "$subvendor" "$subdevice" "$class" "$revision" "$driver" "$iommu" "$numa" "$cpulist" "$mdev_types" >> "$SUMMARY"
 done < "$BDF_FILE"
+
+redact_serials() {
+    local dir="$1"
+    log "redacting hardware serial numbers in $dir"
+    # Step 1: replace the "Serial Number" label itself (all case variants) with XXX.
+    #         Intentionally skips "Serial bus controller" / "Serial Attached SCSI"
+    #         because those are PCI device-type strings, not serial-number fields.
+    find "$dir" -type f | xargs -r sed -i \
+        's/[Ss]erial [Nn]umber/XXX/g' 2>/dev/null || true
+    # Step 2: redact PCIe DSN hex values — "Device XXX XX-XX-XX-XX-XX-XX-XX-XX"
+    find "$dir" -type f | xargs -r sed -i -E \
+        's/(Device XXX) [0-9a-fA-F]{2}(-[0-9a-fA-F]{2}){7}/\1 REDACTED/g' \
+        2>/dev/null || true
+    # Step 3: redact [SN] VPD tag values — "[SN] XXX: VALUE"
+    find "$dir" -type f | xargs -r sed -i -E \
+        's/(\[SN\] XXX:) [^ \t]+/\1 REDACTED/g' 2>/dev/null || true
+    # Step 4: redact nvidia-smi numeric GPU serials — "XXX  : NNNNN..."
+    find "$dir" -type f | xargs -r sed -i -E \
+        's/(XXX)( +: +)[0-9]{5,}/\1\2REDACTED/g' 2>/dev/null || true
+}
+
+if [ "$REDACT" -eq 1 ]; then
+    redact_serials "$OUTDIR"
+fi
 
 if [ "$MAKE_TAR" -eq 1 ]; then
     tarball="$OUTDIR.tar.gz"
